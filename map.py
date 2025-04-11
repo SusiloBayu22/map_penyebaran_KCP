@@ -4,11 +4,10 @@ import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
+from io import BytesIO
 
-# Atur layout agar full screen
 st.set_page_config(page_title="Peta Lokasi Penyebaran", layout="wide")
 
-# ⏳ Cache loading data
 @st.cache_data
 def load_data():
     df = pd.read_excel("LongLat_Geocode_Smartfren.xlsx")
@@ -17,63 +16,79 @@ def load_data():
 
 df = load_data()
 
-# Validasi kolom
-required_columns = {"KABUPATEN/KOTA", "Latitude", "Longitude", "KCP"}
+required_columns = {"PROVINSI", "KABUPATEN/KOTA", "Latitude", "Longitude", "KCP"}
 if not required_columns.issubset(df.columns):
     st.error(f"Kolom berikut wajib ada di file: {', '.join(required_columns)}")
     st.stop()
 
-# Sidebar - filter lokasi
+if "kcp_colors" not in st.session_state:
+    st.session_state.kcp_colors = {}
+
+# Sidebar - Filter Lokasi
 st.sidebar.title("Filter Lokasi")
-kabupaten_kota_list = sorted(df["KABUPATEN/KOTA"].dropna().unique().tolist())
+provinsi_list = sorted(df["PROVINSI"].dropna().unique().tolist())
+all_provinsi = st.sidebar.checkbox("Pilih Semua Provinsi", value=True)
 
-# Session state untuk reset filter
-if "selected_kabupaten" not in st.session_state:
-    st.session_state.selected_kabupaten = []
+provinsi_terpilih = provinsi_list if all_provinsi else st.sidebar.multiselect(
+    "Pilih Provinsi",
+    provinsi_list,
+    placeholder="Cari atau pilih provinsi..."
+)
 
-if "selected_kcp" not in st.session_state:
-    st.session_state.selected_kcp = []
+filtered_by_provinsi = df[df["PROVINSI"].isin(provinsi_terpilih)] if provinsi_terpilih else pd.DataFrame(columns=df.columns)
 
-# Tombol reset filter
-if st.sidebar.button("🔄 Reset Semua Filter"):
-    st.session_state.selected_kabupaten = []
-    st.session_state.selected_kcp = []
+# Informasi detail
+if provinsi_terpilih:
+    st.sidebar.markdown(f"### ℹ️ Info Provinsi")
+    st.sidebar.markdown(f"- Terpilih: **{', '.join(provinsi_terpilih)}**")
+    
+    total_kabupaten = filtered_by_provinsi["KABUPATEN/KOTA"].nunique()
+    total_titik = len(filtered_by_provinsi)
 
-# Pilih kabupaten/kota
-kabupaten_kota_terpilih = st.sidebar.multiselect(
+    st.sidebar.markdown(f"- Jumlah Kabupaten/Kota: **{total_kabupaten}**")
+    st.sidebar.markdown(f"- Total Titik KCP: **{total_titik}**")
+    st.sidebar.markdown("#### Titik per Kabupaten/Kota:")
+    
+    kab_stat = (
+        filtered_by_provinsi
+        .groupby("KABUPATEN/KOTA")
+        .size()
+        .sort_values(ascending=False)
+    )
+
+    for kab, count in kab_stat.items():
+        st.sidebar.markdown(f"- {kab}: {count} titik")
+
+# Filter Kabupaten/Kota
+kabupaten_list = sorted(filtered_by_provinsi["KABUPATEN/KOTA"].dropna().unique().tolist())
+all_kabupaten = st.sidebar.checkbox("Pilih Semua Kabupaten/Kota", value=True)
+
+kabupaten_terpilih = kabupaten_list if all_kabupaten else st.sidebar.multiselect(
     "Pilih Kabupaten/Kota",
-    kabupaten_kota_list,
-    default=st.session_state.selected_kabupaten,
-    placeholder="Cari atau pilih kabupaten/kota...",
-    key="selected_kabupaten"
+    kabupaten_list,
+    placeholder="Cari atau pilih kabupaten/kota..."
 )
 
-# Ambil list KCP berdasarkan kabupaten terpilih
-filtered_for_kcp = df[df["KABUPATEN/KOTA"].isin(kabupaten_kota_terpilih)] if kabupaten_kota_terpilih else pd.DataFrame(columns=df.columns)
-kcp_list = sorted(filtered_for_kcp["KCP"].dropna().unique().tolist())
+filtered_by_kabupaten = filtered_by_provinsi[filtered_by_provinsi["KABUPATEN/KOTA"].isin(kabupaten_terpilih)] if kabupaten_terpilih else pd.DataFrame(columns=df.columns)
 
-# Pilih KCP
-kcp_terpilih = st.sidebar.multiselect(
-    "Pilih Nama KCP",
-    kcp_list,
-    default=st.session_state.selected_kcp,
-    placeholder="Cari atau pilih KCP...",
-    key="selected_kcp"
+# Filter KCP
+kcp_list = sorted(filtered_by_kabupaten["KCP"].dropna().unique().tolist())
+kcp_terpilih = st.sidebar.multiselect("Pilih Nama KCP", kcp_list, placeholder="Cari atau pilih KCP...")
+
+warna_marker = st.sidebar.selectbox(
+    "Pilih Warna Untuk KCP Spesial",
+    ["red", "green", "blue", "orange", "purple", "darkred", "cadetblue"]
 )
 
-# ❗ Filter data akhir (dilakukan hanya jika user memilih sesuatu)
-filtered_df = df.copy()
+if st.sidebar.button("🎯 Tandai KCP dengan Warna Ini"):
+    for kcp in kcp_terpilih:
+        st.session_state.kcp_colors[kcp] = warna_marker
 
-# Jika user sudah memilih kabupaten/kota atau KCP
-if kabupaten_kota_terpilih or kcp_terpilih:
-    if kabupaten_kota_terpilih:
-        filtered_df = filtered_df[filtered_df["KABUPATEN/KOTA"].isin(kabupaten_kota_terpilih)]
-    if kcp_terpilih:
-        filtered_df = filtered_df[filtered_df["KCP"].isin(kcp_terpilih)]
-else:
-    filtered_df = pd.DataFrame(columns=df.columns)  # Peta kosong dulu
+if st.sidebar.button("🔄 Reset Semua Warna KCP"):
+    st.session_state.kcp_colors = {}
 
-# Tentukan center peta
+filtered_df = filtered_by_kabupaten.copy()
+
 if not filtered_df.empty:
     lat_center = filtered_df["Latitude"].mean()
     lon_center = filtered_df["Longitude"].mean()
@@ -81,23 +96,51 @@ else:
     lat_center = 0.8500
     lon_center = 114.1500
 
-# Buat peta
 m = folium.Map(location=[lat_center, lon_center], zoom_start=6, tiles="OpenStreetMap")
 
-# Tambahkan marker hanya kalau data terfilter tidak kosong
-if not filtered_df.empty:
-    for _, row in filtered_df.iterrows():
-        lat, lon = row["Latitude"], row["Longitude"]
-        popup_info = f"{row['KCP']}<br>{row['KABUPATEN/KOTA']}"
-        folium.Marker(
-            location=[lat, lon],
-            popup=popup_info,
-            icon=folium.Icon(color="blue", icon="info-sign"),
-        ).add_to(m)
+for _, row in filtered_df.iterrows():
+    lat, lon = row["Latitude"], row["Longitude"]
+    kcp = row["KCP"]
+    popup_info = f"{kcp}<br>{row['KABUPATEN/KOTA']}<br>{row['PROVINSI']}"
+    icon_color = st.session_state.kcp_colors.get(kcp, "blue")
+    folium.Marker(
+        location=[lat, lon],
+        popup=popup_info,
+        icon=folium.Icon(color=icon_color, icon="info-sign"),
+    ).add_to(m)
 
-# Tampilkan di Streamlit
-st.title("Peta Lokasi Penyebaran")
-st.markdown("Gunakan filter di sidebar untuk memilih kabupaten/kota dan/atau nama KCP.")
+st.title("🗺️ Peta Lokasi Penyebaran")
+st.markdown("Gunakan filter di sidebar untuk memilih provinsi, kabupaten/kota, dan KCP. Tandai titik spesial dengan warna berbeda.")
 
 st_folium(m, use_container_width=True, height=700)
+
+# --- Tombol download data hasil filter ---
+buffer_all = BytesIO()
+filtered_df.to_excel(buffer_all, index=False, engine='openpyxl')
+buffer_all.seek(0)
+
+st.download_button(
+    label="⬇️ Download Data yang Difilter (Excel)",
+    data=buffer_all,
+    file_name="filtered_data.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+# --- Tombol download KCP yang sudah ditandai ---
+kcp_colored_df = df[df["KCP"].isin(st.session_state.kcp_colors.keys())].copy()
+if not kcp_colored_df.empty:
+    # Tambahkan kolom warna
+    kcp_colored_df["Warna"] = kcp_colored_df["KCP"].map(st.session_state.kcp_colors)
+
+    buffer_colored = BytesIO()
+    kcp_colored_df.to_excel(buffer_colored, index=False, engine='openpyxl')
+    buffer_colored.seek(0)
+
+    st.download_button(
+        label="🎨 Download KCP yang Ditandai Saja (Excel)",
+        data=buffer_colored,
+        file_name="kcp_ditandai.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
 
